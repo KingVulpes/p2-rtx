@@ -438,6 +438,13 @@ namespace components
 		int planenum;
 	};
 
+	struct IMesh;
+	struct IIndexBuffer_vtbl;
+	struct IVertexBuffer_vtbl;
+	struct IMaterial;
+	struct IMaterial_vtbl;
+	struct IMaterialVar_vtbl;
+
 	struct mtexinfo_t
 	{
 		Vector4D textureVecsTexelsPerWorldUnits[2];
@@ -446,7 +453,7 @@ namespace components
 		float worldUnitsPerLuxel;
 		unsigned __int16 flags;
 		unsigned __int16 texinfoFlags;
-		void* material; // IMaterial
+		IMaterial* material; // IMaterial
 	};
 
 	struct csurface_t
@@ -491,6 +498,22 @@ namespace components
 		void* sprite; // CEngineSprite
 	};
 
+	struct msurface2_t
+	{
+		unsigned int flags;
+		cplane_t* plane;
+		int firstvertindex;
+		unsigned __int16 decals;
+		unsigned __int16 m_ShadowDecals;
+		unsigned __int16 m_nFirstOverlayFragment;
+		__int16 materialSortID;
+		unsigned __int16 vertBufferIndex;
+		unsigned __int16 m_bDynamicShadowsEnabled : 1;
+		unsigned __int16 texinfo : 15;
+		void* pDispInfo; // IDispInfo
+		int visframe;
+	};
+
 	struct worldbrushdata_t
 	{
 		int numsubmodels;
@@ -524,7 +547,7 @@ namespace components
 		void* hDispInfos;
 		int numsurfaces;
 		void* surfaces1; // msurface1_t
-		void* surfaces2; // msurface2_t
+		msurface2_t* surfaces2;
 		void* surfacelighting; // msurfacelighting_t
 		msurfacenormal_t* surfacenormals;
 		unsigned __int16* m_pSurfaceBrushes;
@@ -532,7 +555,7 @@ namespace components
 		int numvertindices;
 		unsigned __int16* vertindices;
 		int nummarksurfaces;
-		void** marksurfaces; // msurface2_t
+		msurface2_t** marksurfaces;
 		void* lightdata; // ColorRGBExp32
 		int m_nLightingDataSize;
 		int numworldlights;
@@ -771,13 +794,6 @@ namespace components
 		int m_nFirstVertex;
 		unsigned int m_nOffset;
 	};
-
-	struct IMesh;
-	struct IIndexBuffer_vtbl;
-	struct IVertexBuffer_vtbl;
-	struct IMaterial;
-	struct IMaterial_vtbl;
-	struct IMaterialVar_vtbl;
 
 	struct IVertexBuffer
 	{
@@ -1079,6 +1095,30 @@ namespace components
 	  int topologyOffset;
 	};*/
 
+	struct mstudio_modelvertexdata_t
+	{
+		const void* pVertexData;
+		const void* pTangentData;
+	};
+
+	struct mstudiomodel_t
+	{
+		char name[64];
+		int type;
+		float boundingradius;
+		int nummeshes;
+		int meshindex;
+		int numvertices;
+		int vertexindex;
+		int tangentsindex;
+		int numattachments;
+		int attachmentindex;
+		int numeyeballs;
+		int eyeballindex;
+		mstudio_modelvertexdata_t vertexdata;
+		int unused[8];
+	};
+
 	struct studiomeshgroup_t
 	{
 		IMesh* m_pMesh;
@@ -1132,7 +1172,7 @@ namespace components
 	struct IClientRenderable_vtbl;
 	struct IClientRenderable
 	{
-		IClientRenderable_vtbl* vftable;
+		IClientRenderable_vtbl* vftable_iclientrenderable;
 	};
 
 	const struct RenderableInstance_t
@@ -1726,7 +1766,7 @@ namespace components
 	struct IHandleEntity_vtbl;
 	struct IHandleEntity
 	{
-		IHandleEntity_vtbl* vftable;
+		IHandleEntity_vtbl* vftable_ihandleent;
 	};
 
 	struct IHandleEntity_vtbl
@@ -1779,8 +1819,10 @@ namespace components
 		void(__thiscall* Release)(IClientThinkable*);
 	};
 
+	struct IClientEntity_vtbl;
 	struct IClientEntity : IClientUnknown, IClientRenderable, IClientNetworkable, IClientThinkable
 	{
+		//IClientEntity_vtbl* vtbl_icliententity;
 	};
 
 	struct C_BaseEntity;
@@ -2303,9 +2345,26 @@ namespace components
 	STATIC_ASSERT_OFFSET(DynamicState_t, m_SamplerState, 2172); // <6240 (offset from shaderapi 0x0> - <40 (m_TextureEnable offset)> - <4028 (pad in IShaderAPIDX8)>
 	STATIC_ASSERT_OFFSET(DynamicState_t, m_RenderState, 2972);
 
+	enum MaterialFogMode_t : __int32
+	{
+		MATERIAL_FOG_NONE = 0x0,
+		MATERIAL_FOG_LINEAR = 0x1,
+		MATERIAL_FOG_LINEAR_BELOW_FOG_Z = 0x2,
+	};
+
 	struct IShaderAPIDX8_vtbl
 	{
-		char pad[1016];
+		long double(__thiscall* CurrentTime)(void* shaderapi_ptr);
+		void(__thiscall* GetLightmapDimensions)(void* shaderapi_ptr, int*, int*);
+		MaterialFogMode_t(__thiscall* GetSceneFogMode)(void* shaderapi_ptr);
+		void(__thiscall* GetSceneFogColor)(void* shaderapi_ptr, std::uint8_t*);
+		void(__thiscall* SetVertexShaderConstant)(void* shaderapi_ptr, int, const float*, int, bool);
+		void(__thiscall* SetPixelShaderConstant)(void* shaderapi_ptr, int, const float*, int, bool);
+		void(__thiscall* SetDefaultState)(void* shaderapi_ptr);
+		void(__thiscall* GetWorldSpaceCameraPosition)(void* shaderapi_ptr, float*);
+		void(__thiscall* GetWorldSpaceCameraDirection)(void* shaderapi_ptr, float*);
+		int(__thiscall* GetCurrentNumBones)(void* shaderapi_ptr);
+		char pad[976]; //[1016];
 		IDirect3DBaseTexture9* (__fastcall* GetD3DTexture)(void* shaderapi_ptr, void* ecx, int handle);
 		void* pad97;
 		void* pad98;
@@ -2525,46 +2584,25 @@ namespace components
 		char* (__thiscall* GetIDString)(C_Prop_Portal*);
 	};
 
-	enum RemixInstanceCategories : uint32_t
+	struct mstudio_meshvertexdata_t
 	{
-		WorldUI					= 1 << 0,
-		WorldMatte				= 1 << 1,
-		Sky						= 1 << 2,
-		Ignore					= 1 << 3,
-		IgnoreLights			= 1 << 4,
-		IgnoreAntiCulling		= 1 << 5,
-		IgnoreMotionBlur		= 1 << 6,
-		IgnoreOpacityMicromap	= 1 << 7,
-		IgnoreAlphaChannel		= 1 << 8,
-		Hidden					= 1 << 9,
-		Particle				= 1 << 10,
-		Beam					= 1 << 11,
-		DecalStatic				= 1 << 12,
-		DecalDynamic			= 1 << 13,
-		DecalSingleOffset		= 1 << 14,
-		DecalNoOffset			= 1 << 15,
-		AlphaBlendToCutout		= 1 << 16,
-		Terrain					= 1 << 17,
-		AnimatedWater			= 1 << 18,
-		ThirdPersonPlayerModel	= 1 << 19,
-		ThirdPersonPlayerBody	= 1 << 20,
-		IgnoreBakedLighting		= 1 << 21,
+		const mstudio_modelvertexdata_t* modelvertexdata;
+		int numLODVertexes[8];
 	};
 
-	struct msurface2_t
+	struct mstudioboneweight_t
 	{
-		unsigned int flags;
-		cplane_t* plane;
-		int firstvertindex;
-		unsigned __int16 decals;
-		unsigned __int16 m_ShadowDecals;
-		unsigned __int16 m_nFirstOverlayFragment;
-		__int16 materialSortID;
-		unsigned __int16 vertBufferIndex;
-		unsigned __int16 m_bDynamicShadowsEnabled : 1;
-		unsigned __int16 texinfo : 15;
-		void* pDispInfo; // IDispInfo
-		int visframe;
+		float weight[3];
+		unsigned __int8 bone[3];
+		unsigned __int8 numbones;
+	};
+
+	struct mstudiovertex_t
+	{
+		mstudioboneweight_t m_BoneWeights;
+		Vector m_vecPosition;
+		Vector m_vecNormal;
+		Vector2D m_vecTexCoord;
 	};
 
 	struct __declspec(align(4)) CIndexBuilder : IndexDesc_t

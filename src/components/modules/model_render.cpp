@@ -11,6 +11,8 @@ namespace components
 	namespace cmd
 	{
 		bool model_info_vis = false;
+		bool ms_unbake_info = false;
+		std::unordered_set<std::string_view> ms_unbake_info_logged_strings;
 	}
 
 	namespace ff_model
@@ -139,26 +141,6 @@ namespace components
 
 		return found;
 	}
-
-	// adds '$nocull' material var to material - returns true if exists
-	//bool add_nocull_materialvar(IMaterialInternal* cmat)
-	//{
-	//	bool found = false;
-	//	auto cullvar = cmat->vftable->FindVar(cmat, nullptr, "$nocull", &found, false);
-	//	//auto varname = cullvar->vftable->GetName(cullvar);
-
-	//	if (!found)
-	//	{
-	//		utils::function<IMaterialVar* (IMaterialInternal* pMaterial, const char* pKey, int val)> IMaterialVar_Create = MATERIALSTYSTEM_BASE + 0x1A2F0;
-	//		auto var = IMaterialVar_Create(cmat, "$nocull", 1);
-
-	//		cmat->vftable->AddMaterialVar(cmat, nullptr, var);
-	//		cullvar = cmat->vftable->FindVar(cmat, nullptr, "$nocull", &found, false);
-	//	}
-
-	//	return found;
-	//}
-
 
 	D3DCOLORVALUE g_old_light_to_texture_color = {};
 	bool g_light_to_texture_modified = false;
@@ -364,9 +346,95 @@ namespace components
 #endif
 	}
 
+	// draw 'nocull' map_setting marker meshes
+	void model_render::draw_nocull_markers()
+	{
+		//g_sunoverlay_color.clear(); // TODO: this should be moved somewhere else
+
+		// -----
+
+		const auto& msettings = map_settings::get_map_settings();
+		const auto dev = game::get_d3d_device();
+
+		struct vertex { D3DXVECTOR3 position; D3DCOLOR color; float tu, tv; };
+
+		// early out - nope -> always render a single tri to register tex_addon texture
+		if (msettings.map_markers.empty()) {
+			return;
+		}
+
+		// save & restore after drawing
+		IDirect3DVertexShader9* og_vs = nullptr;
+		dev->GetVertexShader(&og_vs);
+		dev->SetVertexShader(nullptr);
+
+		IDirect3DBaseTexture9* og_tex = nullptr;
+		dev->GetTexture(0, &og_tex);
+		dev->SetTexture(0, tex_addons::white);
+
+		DWORD og_rs;
+		dev->GetRenderState((D3DRENDERSTATETYPE)150, &og_rs);
+
+		dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+		//D3DXMATRIX mtx = game::IDENTITY;
+
+		for (auto& m : msettings.map_markers)
+		{
+			// ignore normal markers
+			if (!m.no_cull) {
+				continue;
+			}
+
+			// main_module::pre_recursive_world_node
+			if (m.is_hidden) {
+				continue;
+			}
+
+			const float f_index = static_cast<float>(m.index);
+			const vertex mesh_verts[4] =
+			{
+				D3DXVECTOR3(-4.1337f - (f_index * 0.01f), -4.1337f - (f_index * 0.01f), 0), D3DCOLOR_XRGB(m.index, 0, 0), 0.0f, f_index / 100.0f,
+				D3DXVECTOR3( 4.1337f + (f_index * 0.01f), -4.1337f - (f_index * 0.01f), 0), D3DCOLOR_XRGB(0, m.index, 0), f_index / 100.0f, 0.0,
+				D3DXVECTOR3( 4.1337f + (f_index * 0.01f),  4.1337f + (f_index * 0.01f), 0), D3DCOLOR_XRGB(0, 0, m.index), 0.0f, f_index / 100.0f,
+				D3DXVECTOR3(-4.1337f - (f_index * 0.01f),  4.1337f + (f_index * 0.01f), 0), D3DCOLOR_XRGB(m.index, 0, m.index), 0.0f, f_index / 100.0f,
+			};
+
+			D3DXMATRIX scale_matrix, rotation_x, rotation_y, rotation_z, mat_rotation, mat_translation, world;
+
+			D3DXMatrixScaling(&scale_matrix, m.scale.x, m.scale.y, m.scale.z);
+			D3DXMatrixRotationX(&rotation_x, m.rotation.x); // pitch
+			D3DXMatrixRotationY(&rotation_y, m.rotation.y); // yaw
+			D3DXMatrixRotationZ(&rotation_z, m.rotation.z); // roll
+			mat_rotation = rotation_z * rotation_y * rotation_x; // combine rotations (order: Z * Y * X)
+
+			D3DXMatrixTranslation(&mat_translation, m.origin.x, m.origin.y, m.origin.z);
+			world = scale_matrix * mat_rotation * mat_translation;
+
+			// set remix texture hash ~req. dxvk-runtime changes - not really needed
+			dev->SetRenderState((D3DRENDERSTATETYPE)150, 100 + m.index);
+
+			dev->SetTransform(D3DTS_WORLD, &world);
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, mesh_verts, sizeof(vertex));
+		}
+
+		// restore
+		dev->SetVertexShader(og_vs);
+		dev->SetTexture(0, og_tex);
+		dev->SetRenderState((D3DRENDERSTATETYPE)150, og_rs);
+		dev->SetFVF(NULL);
+		dev->SetTransform(D3DTS_WORLD, &game::IDENTITY);
+	}
 
 	void __fastcall tbl_hk::model_renderer::DrawModelExecute::Detour(void* ecx, void* edx, void* oo, const DrawModelState_t& state, const ModelRenderInfo_t& pInfo, matrix3x4_t* pCustomBoneToWorld)
 	{
+		// works fine on l4d2 but causes issues on p2 (might not render in some cases -> now called from main_module::on_renderview)
+		// draw nocull markers before drawing the first model - no particular reason besides that we dont want to draw them before rendering the sky
+		/*if (game::saved_view_id != VIEW_3DSKY && !model_render::get()->m_drew_model)
+		{
+			model_render::draw_nocull_markers();
+			model_render::get()->m_drew_model = true;
+		}*/
+
 		const auto dev = game::get_d3d_device();
 		dev->GetVertexShader(&ff_model::s_shader);
 		dev->SetTransform(D3DTS_WORLD, &game::IDENTITY);
@@ -376,7 +444,7 @@ namespace components
 			map_settings::is_level.sp_a2_bts3)
 		{
 			if (std::string_view(pInfo.pModel->szPathName).contains("sphere")) {
-				api::remix_lights::bts3_set_flashlight_start_pos(pInfo.origin);
+				remix_lights::bts3_set_flashlight_start_pos(pInfo.origin);
 			}
 		}
 
@@ -417,18 +485,21 @@ namespace components
 			}
 		}
 
-		if (!ignore)
+		if (!ignore && !hmsettings.substrings.empty())
 		{
 			const auto mdl_string = std::string_view(pInfo.pModel->szPathName);
 			for (const auto& hide_mdl_with_substr : hmsettings.substrings)
 			{
-				if (mdl_string.contains(hide_mdl_with_substr)) 
+				if (mdl_string.contains(hide_mdl_with_substr))
 				{
 					ignore = true;
 					break;
 				}
 			}
 		}
+
+		// check for attached lights
+		remix_lights::on_draw_model_exec(pInfo);
 
 		if (!ignore) 
 		{
@@ -447,9 +518,9 @@ namespace components
 		}
 		else
 		{
-			if (cmd::model_info_vis) 
+			if (cmd::model_info_vis)
 			{
-				if (g_player_view_org.DistToSqr(pInfo.origin) < 1000.0f * 1000.0f)
+				if (game::get_current_view_origin()->DistToSqr(pInfo.origin) < 1000.0f * 1000.0f)
 				{
 					game::debug_add_text_overlay(&pInfo.origin.x, "#IGNORED#", 0, 1.0f, 0.6f, 0.6f, 0.6f);
 					game::debug_add_text_overlay(&pInfo.origin.x, pInfo.pModel->szPathName, 1, 1.0f, 0.6f, 0.6f, 0.6f);
@@ -646,7 +717,7 @@ namespace components
 			}
 
 			// this requires dxvk-remix modifications (https://github.com/NVIDIAGameWorks/dxvk-remix/pull/79)
-			set_remix_texture_categories(dev, ctx, IgnoreOpacityMicromap | DecalStatic);
+			set_remix_texture_categories(dev, ctx, REMIXAPI_INSTANCE_CATEGORY_BIT_IGNORE_OPACITY_MICROMAP | REMIXAPI_INSTANCE_CATEGORY_BIT_DECAL_STATIC);
 			set_remix_texture_hash(dev, ctx, 0x1337);
 		}
 	}
@@ -1147,8 +1218,15 @@ namespace components
 
 		current_transform *= scale_matrix;
 		ctx.modifiers.as_emancipation_grill = !side_emitters;
-		ctx.modifiers.emancipation_scale = { 1.2f - (std::cosf(g_flTime * 0.01f) * 1.0f), 1.2f - (std::cosf(g_flTime * 0.01f) * 1.0f) };
-		ctx.modifiers.emancipation_offset = { g_flTime * 0.01f, g_flTime * -0.0015f };
+
+		//auto& u1 = imgui::get()->m_debug_vector.x; // 1.2
+		//auto& u2 = imgui::get()->m_debug_vector.y; // 1.2
+		//auto& u3 = imgui::get()->m_debug_vector.z; // 1.0
+		//auto& u4 = imgui::get()->m_debug_vector2.x; // 0.01f
+		//auto& u5 = imgui::get()->m_debug_vector2.y; // -0.0015f
+
+		ctx.modifiers.emancipation_scale = { 0.24f - (std::cosf(g_flTime * 0.01f) * 2.03f), 0.1f - (std::cosf(g_flTime * 0.01f) * 2.03f) };
+		ctx.modifiers.emancipation_offset = { g_flTime * -0.001f, g_flTime * 0.001f };
 		ctx.modifiers.emancipation_color_scale = g_flPowerUp;
 
 		ctx.set_texture_transform(dev, &current_transform);
@@ -1317,10 +1395,9 @@ namespace components
 		}
 	}
 
-	// 
-	// main render path for every surface
 
-	void cmeshdx8_renderpass_pre_draw(CMeshDX8* mesh, [[maybe_unused]] CPrimList* primlist)
+	// main render path for every surface
+	void cmeshdx8_renderpass_pre_draw(CMeshDX8* mesh, [[maybe_unused]] CPrimList* primlist, [[maybe_unused]] MeshInstanceData_t* info = nullptr)
 	{
 
 #if defined(BENCHMARK)
@@ -1355,27 +1432,43 @@ namespace components
 							var = nullptr;
 							const auto has_bottom_mat = has_materialvar(ctx.info.material, "$bottommaterial", &var);
 
-							if (!has_bottom_mat)
+							if (has_bottom_mat)
 							{
-								// do not render water surfaces that have no bottom material (this is the surface below the water)
-								// could just check $abovewater I guess? lmao
+								const auto& ms = map_settings::get_map_settings();
 
 								// we only need one surface
-								ctx.modifiers.do_not_render = true;
-							}
+								ctx.modifiers.as_water = true;
+								ctx.modifiers.og_mesh_z_offset = ms.water_offset_bottom;
+								ctx.modifiers.dual_render_with_specified_texture = true;
+								ctx.modifiers.dual_render_texture_z_offset = ms.water_offset_top; //0.5f;
+								ctx.modifiers.dual_render_texture = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[2]);
 
-							// put the normalmap into texture slot 0
-							else
-							{
-								//  BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, NORMALMAP, BUMPFRAME );
-								IDirect3DBaseTexture9* tex = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[2]);
+								// assign flowmap
+								IDirect3DBaseTexture9* tex = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[4]);
 								if (tex)
 								{
-									// save og texture
-									ctx.modifiers.as_water = true;
 									ctx.save_texture(dev, 0);
 									dev->SetTexture(0, tex);
 								}
+
+								// scale water uv
+								D3DXMATRIX scale_matrix; // create a scaling matrix
+								D3DXMatrixScaling(&scale_matrix, 1.5f * ms.water_uv_scale, 1.5f * ms.water_uv_scale, 1.0f);
+
+								ctx.save_ss(dev, D3DSAMP_ADDRESSU);
+								ctx.save_ss(dev, D3DSAMP_ADDRESSV);
+								dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+								dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+
+								ctx.set_texture_transform(dev, &scale_matrix);
+								ctx.save_tss(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
+								dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+							}
+
+							// ignore 'beneath'
+							else
+							{
+								ctx.modifiers.do_not_render = true;
 							}
 						}
 
@@ -1390,12 +1483,22 @@ namespace components
 								ctx.modifiers.as_water = true;
 								ctx.save_texture(dev, 0);
 								dev->SetTexture(0, tex);
+
+								const auto& ms = map_settings::get_map_settings();
+								ctx.modifiers.og_mesh_z_offset = ms.water_offset_bottom;
+								ctx.modifiers.dual_render_with_specified_texture = true;
+								ctx.modifiers.dual_render_texture_z_offset = ms.water_offset_top;
+								ctx.modifiers.dual_render_texture = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[2]);
 							}
 						}
 					}
 				}
 			}
 		}
+
+		dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+		dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]);
+		dev->SetTransform(D3DTS_PROJECTION, &ctx.info.buffer_state.m_Transform[2]);
 
 		/*if (ctx.info.material_name.contains("props_foliage"))
 		{
@@ -1434,6 +1537,9 @@ namespace components
 				ctx.save_projection_transform(dev);
 				dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]);
 				dev->SetTransform(D3DTS_PROJECTION, &ctx.info.buffer_state.m_Transform[2]);
+
+				//viewmodel_view_matrix = ctx.info.buffer_state.m_Transform[1];
+				//viewmodel_proj_matrix = ctx.info.buffer_state.m_Transform[2];
 			}
 			else if (ctx.info.material_name.contains("models/props_destruction/glass_")) 
 			{
@@ -1442,6 +1548,10 @@ namespace components
 				{
 					ctx.save_texture(dev, 0);
 					dev->SetTexture(0, tex_addons::glass_shards);
+
+					if (map_settings::is_level.sp_a1_intro1) {
+						set_remix_texture_hash(dev, ctx, 0xB9C1E4B); // glass_shards_intro1
+					}
 				}
 			}
 			else if (ctx.info.material_name.starts_with("gla"))
@@ -1466,8 +1576,27 @@ namespace components
 				}
 			}
 
-			dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
-			dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX6);
+#if 0		// models that can cause problems with vertex transform unbaking (debug)
+			if (ctx.info.material_name.contains("incinerator_door")) {
+				int break_me = 1; 
+			}
+
+			// wall_dest_003
+			if (ctx.info.material_name.contains("wall_dest_003")) {
+				int break_me = 1;
+			}
+
+			if (ctx.info.material_name.contains("turret_casing")) {
+				int break_me = 1;
+			}
+#endif
+
+			// holds identity or transposed poseToMesh on unbaked meshes (MapSettings [UNBAKE]) - see R_StudioSoftwareProcessMesh_hk
+			auto wrld = &model_render::get()->m_unbake_transforms_p2w_transform;
+			dev->SetTransform(D3DTS_WORLD, wrld);
+			//dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+
+			dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX6); 
 			dev->SetVertexShader(nullptr); // vertexformat 0x00000000000a0003 
 		}
 
@@ -1577,15 +1706,15 @@ namespace components
 					const auto& scale_setting = map_settings::get_map_settings().water_uv_scale;
 
 					// create a scaling matrix
-					D3DXMATRIX scaleMatrix;
-					D3DXMatrixScaling(&scaleMatrix, 1.5f * scale_setting, 1.5f * scale_setting, 1.0f);
+					D3DXMATRIX scale_matrix;
+					D3DXMatrixScaling(&scale_matrix, 1.5f * scale_setting, 1.5f * scale_setting, 1.0f);
 
 					ctx.save_ss(dev, D3DSAMP_ADDRESSU);
 					ctx.save_ss(dev, D3DSAMP_ADDRESSV);
 					dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
 					dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
 
-					ctx.set_texture_transform(dev, &scaleMatrix); 
+					ctx.set_texture_transform(dev, &scale_matrix); 
 					ctx.save_tss(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
 					dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
 				}
@@ -1627,7 +1756,7 @@ namespace components
 				// render bik using shaders
 				else if (ctx.info.material_name.starts_with("videobik") || ctx.info.material_name.starts_with("media/"))
 				{
-					set_remix_texture_categories(dev, ctx, DecalStatic);
+					set_remix_texture_categories(dev, ctx, REMIXAPI_INSTANCE_CATEGORY_BIT_DECAL_STATIC);
 					set_remix_texture_hash(dev, ctx, utils::string_hash32(ctx.info.material_name));
 
 					// works but not of much use if we cant use the albedo as emissive
@@ -1896,7 +2025,7 @@ namespace components
 
 						// dirty hack to invert the portal direction in the spawn area on sp_a4_finale2 because
 						// the static overlays on portals (that we use to identify and render the rayportals) are rendered on the inside of the moving object
-						if (map_settings::is_level.sp_a4_finale2 && g_player_current_area == 4)
+						if (map_settings::is_level.sp_a4_finale2 && g_current_area == 4)
 						{
 							// invert along the x axis
 							ctx.info.buffer_state.m_Transform[0].m[0][0] = -1;
@@ -2081,7 +2210,7 @@ namespace components
 					bool is_world_ui_text = ctx.info.buffer_state.m_Transform[0].m[3][0] != 0.0f && ctx.info.material_name == "vgui__fontpage";
 
 					if (is_world_ui_text) {
-						set_remix_texture_categories(dev, ctx, WorldUI);
+						set_remix_texture_categories(dev, ctx, REMIXAPI_INSTANCE_CATEGORY_BIT_WORLD_UI);
 					}
 
 					// vgui/screens/vgui_coop_progress_board
@@ -2148,6 +2277,8 @@ namespace components
 							vcol_r * scalar, 
 							vcol_g * scalar, 
 							vcol_b * scalar, 1.0f));
+
+						set_remix_emissive_intensity(dev, ctx, model_render::vgui_progress_board_scalar);
 					}
 
 					else if (is_world_ui_text
@@ -2254,9 +2385,10 @@ namespace components
 					// fix particles on intro1 after breaking the wall
 					else if (ctx.info.material_name.starts_with("particle/"))
 					{
+						//ctx.modifiers.do_not_render = true;
 						//lookat_vertex_decl(dev, primlist);
 						ctx.save_vs(dev);
-						dev->SetVertexShader(nullptr);
+						dev->SetVertexShader(nullptr); 
 						dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_TEX1);
 						dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]); 
 						dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]);
@@ -2441,6 +2573,7 @@ namespace components
 						{
 							// modify light of add-light-to-texture light
 							add_light_to_texture_color_edit(0.4f, 0.85f, 0.55f, 0.001f);
+							set_remix_emissive_intensity(dev, ctx, 0.2f);
 						}
 					}
 				}
@@ -2469,8 +2602,69 @@ namespace components
 
 				//ctx.modifiers.do_not_render = true;
 				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
-				dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]); 
+				dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]);
 				dev->SetTransform(D3DTS_PROJECTION, &ctx.info.buffer_state.m_Transform[2]);
+
+#if 0			// portal gun effect test: move effect to correct position -> effect "too large" for "scaled down" gun (remix projection hack for viewmodel)
+				if (ctx.info.material_name.contains("beam_generic_2")) 
+				{
+					D3DXMATRIX viewMatrix = viewmodel_view_matrix;
+
+					// Identity world transform for the gun
+					D3DXMATRIX identityMatrix;
+					D3DXMatrixIdentity(&identityMatrix);
+
+					const auto& im = imgui::get();
+					float offsetX = im->m_debug_vector.x; //2.8f;  // Move right 
+					float offsetY = im->m_debug_vector.y; //7.1f;  // Move up
+					float offsetZ = im->m_debug_vector.z; // 6.0f; // Move forward (negative Z is often forward in FPS viewmodels)
+
+					// Desired scale for the effect
+					float scaleX = im->m_debug_vector2.x;  // Scale X by 1.5x
+					float scaleY = im->m_debug_vector2.y;  // Scale Y by 1.5x
+					float scaleZ = im->m_debug_vector2.z;  // Scale Z by 1.5x
+
+					// Create the scaling matrix
+					D3DXMATRIX effectScale;
+					D3DXMatrixScaling(&effectScale, scaleX, scaleY, scaleZ);
+
+					// Create the offset matrix in viewmodel space
+					D3DXMATRIX effectOffset;
+					D3DXMatrixTranslation(&effectOffset, offsetX, offsetY, offsetZ);
+
+					// Get the cameras world transform (inverse of view matrix)
+					D3DXMATRIX cameraWorldMatrix;
+					D3DXMatrixInverse(&cameraWorldMatrix, nullptr, &viewMatrix);
+					cameraWorldMatrix._41 = 0.0f; // Clear translation
+					cameraWorldMatrix._42 = 0.0f;
+					cameraWorldMatrix._43 = 0.0f;
+
+					// Combine scale and offset: Scale * Offset
+					D3DXMATRIX scaleAndOffset;
+					D3DXMatrixMultiply(&scaleAndOffset, &effectScale, &effectOffset);
+
+					// Transform the offset by the cameras rotation
+					D3DXMATRIX orientedOffset;
+					D3DXMatrixMultiply(&orientedOffset, &scaleAndOffset, &cameraWorldMatrix);
+
+					//effectWorldMatrix.m[3][0] = im->m_debug_vector.x;
+					//effectWorldMatrix.m[3][1] = im->m_debug_vector.y;
+					//effectWorldMatrix.m[3][2] = im->m_debug_vector.z;
+
+					identityMatrix._41 = orientedOffset._41; // X translation
+					identityMatrix._42 = orientedOffset._42; // Y translation
+					identityMatrix._43 = orientedOffset._43; // Z translation
+
+					identityMatrix._11 = scaleX; // X scale
+					identityMatrix._22 = scaleY; // Y scale
+					identityMatrix._33 = scaleZ; // Z scale
+
+					dev->SetTransform(D3DTS_WORLD, &identityMatrix /*&ctx.info.buffer_state.m_Transform[0]*/);
+					dev->SetTransform(D3DTS_VIEW, &viewmodel_view_matrix);
+					dev->SetTransform(D3DTS_PROJECTION, &viewmodel_proj_matrix);
+					int break_me = 1;
+				}
+#endif
 			}
 #endif
 
@@ -2530,7 +2724,7 @@ namespace components
 				//ctx.modifiers.do_not_render = true;
 
 				// scale the projection matrix for viewmodel particles so that they match the scaled remix viewmodel (currently set to a scale of 0.4)
-				if (ctx.info.buffer_state.m_Transform[2].m[3][2] == -1.00003529f) 
+				if (ctx.info.buffer_state.m_Transform[2].m[3][2] == -1.00003529f)
 				{
 					// #TODO - remove when floating point perc. gets better with shaders
 					//if (map_settings::get_map_name() == "sp_a1_wakeup")  
@@ -2611,7 +2805,7 @@ namespace components
 								}
 							}
 						}
-						api::remix_lights::bts3_set_flashlight_end_pos(flashlight_pos);
+						remix_lights::bts3_set_flashlight_end_pos(flashlight_pos);
 					}
 				}
 				else if (map_settings::is_level.sp_a4_finale4)
@@ -2658,6 +2852,16 @@ namespace components
 						ctx.save_rs(dev, D3DRS_DESTBLEND);
 						dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE);
 					}*/
+				}
+
+				if (ctx.info.material_name == "particle/confetti/confetti") 
+				{
+					//ctx.modifiers.do_not_render = true;
+					//ctx.save_rs(dev, D3DRS_SRCBLEND);
+					//ctx.save_rs(dev, D3DRS_DESTBLEND);
+					//dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+					//dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+					set_remix_emissive_intensity(dev, ctx, 0.01f);
 				}
 
 				if (!disable_vertex_color_modulation) 
@@ -2835,6 +3039,37 @@ namespace components
 				dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX3);
 				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
 			}
+
+			// fastpath model
+			else if (mesh->m_VertexFormat == 0xa2183)
+			{
+				VMatrix mat = {};
+				mat.m[0][0] = info->m_pPoseToWorld->m_flMatVal[0][0];
+				mat.m[1][0] = info->m_pPoseToWorld->m_flMatVal[0][1];
+				mat.m[2][0] = info->m_pPoseToWorld->m_flMatVal[0][2];
+
+				mat.m[0][1] = info->m_pPoseToWorld->m_flMatVal[1][0];
+				mat.m[1][1] = info->m_pPoseToWorld->m_flMatVal[1][1];
+				mat.m[2][1] = info->m_pPoseToWorld->m_flMatVal[1][2];
+
+				mat.m[0][2] = info->m_pPoseToWorld->m_flMatVal[2][0];
+				mat.m[1][2] = info->m_pPoseToWorld->m_flMatVal[2][1];
+				mat.m[2][2] = info->m_pPoseToWorld->m_flMatVal[2][2];
+
+				mat.m[3][0] = info->m_pPoseToWorld->m_flMatVal[0][3];
+				mat.m[3][1] = info->m_pPoseToWorld->m_flMatVal[1][3];
+				mat.m[3][2] = info->m_pPoseToWorld->m_flMatVal[2][3];
+				mat.m[3][3] = game::IDENTITY.m[3][3];
+
+				dev->SetTransform(D3DTS_WORLD, reinterpret_cast<D3DMATRIX*>(&mat.m));
+				dev->SetTransform(D3DTS_VIEW, &ctx.info.buffer_state.m_Transform[1]);
+
+				lookat_vertex_decl(dev);
+				ctx.save_vs(dev);
+				dev->SetFVF(D3DFVF_XYZB2 | D3DFVF_DIFFUSE | D3DFVF_NORMAL | D3DFVF_TEX6);
+				dev->SetVertexShader(nullptr); // vertexformat 0x00000000000a0003 
+			}
+
 #ifdef DEBUG
 			else
 			{
@@ -2939,7 +3174,20 @@ namespace components
 				dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_ADD);
 			}
 
+			if (ctx.modifiers.og_mesh_z_offset != 0.0f)
+			{
+				ctx.info.buffer_state.m_Transform[0].m[3][2] += ctx.modifiers.og_mesh_z_offset;
+				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+			}
+
 			dev->DrawIndexedPrimitive(type, base_vert_index, min_vert_index, num_verts, start_index, prim_count);
+
+			// restore transform
+			if (ctx.modifiers.og_mesh_z_offset != 0.0f)
+			{
+				ctx.info.buffer_state.m_Transform[0].m[3][2] -= ctx.modifiers.og_mesh_z_offset;
+				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+			}
 
 			// restore emissive sky settings
 			if (ctx.modifiers.as_sky)
@@ -3068,7 +3316,10 @@ namespace components
 				dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_TFACTOR);
 				dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_ADD);
 
-				//state.m_Transform[0].m[3][2] += 40.0f;
+				if (ctx.modifiers.dual_render_texture_z_offset != 0.0f) {
+					ctx.info.buffer_state.m_Transform[0].m[3][2] += ctx.modifiers.dual_render_texture_z_offset;
+				}
+
 				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
 
 				// draw second surface 
@@ -3108,10 +3359,18 @@ namespace components
 			ctx.save_texture(dev, 0); 
 			dev->SetTexture(0, tex_addons::emancipation_grill_bg);
 
+			ctx.save_rs(dev, D3DRS_TEXTUREFACTOR);
+			ctx.save_tss(dev, D3DTSS_ALPHAOP);
+			ctx.save_tss(dev, D3DTSS_ALPHAARG2);
+
 			const auto& cs = ctx.modifiers.emancipation_color_scale;
 			dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_COLORVALUE(0.2f * cs, 0.4f * cs, 0.52f * cs, 0.3f * cs));
-			dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE2X);
 			dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_TFACTOR);
+
+			//add_light_to_texture_color_edit(0.2f * cs, 0.4f * cs, 0.52f * cs, 0.3f * cs);
+
+			set_remix_texture_hash(dev, ctx, utils::string_hash32("emancidual")); 
 
 			// draw surface a second time
 			dev->DrawIndexedPrimitive(type, base_vert_index, min_vert_index, num_verts, start_index, prim_count);
@@ -3130,8 +3389,12 @@ namespace components
 				ctx.info.buffer_state.m_Transform[0].m[3][1] += 0.01f;
 				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
 
+				//set_remix_emissive_intensity(dev, ctx, cs);
+
 				// draw surface a third time
 				dev->DrawIndexedPrimitive(type, base_vert_index, min_vert_index, num_verts, start_index, prim_count);
+
+				ctx.restore_texture_transform(dev);
 			}
 		}
 
@@ -3165,7 +3428,32 @@ namespace components
 				ctx.save_rs(dev, D3DRS_ZENABLE);
 				dev->SetRenderState(D3DRS_ZENABLE, FALSE);
 
-				set_remix_texture_categories(dev, ctx, WorldMatte | IgnoreOpacityMicromap);
+				set_remix_texture_categories(dev, ctx, REMIXAPI_INSTANCE_CATEGORY_BIT_WORLD_MATTE | REMIXAPI_INSTANCE_CATEGORY_BIT_IGNORE_OPACITY_MICROMAP);
+			}
+
+			if (ctx.modifiers.dual_render_texture_z_offset != 0.0f)
+			{
+				ctx.info.buffer_state.m_Transform[0].m[3][2] += ctx.modifiers.dual_render_texture_z_offset;
+				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+			}
+
+			if (ctx.modifiers.as_water) 
+			{
+				set_remix_texture_hash(dev, ctx, utils::string_hash32(ctx.info.material_name));
+
+				const auto& scale_setting = map_settings::get_map_settings().water_uv_top_scale;
+				if (!utils::float_equal(scale_setting, 0.0f)) // use scale of parent (bottom) water surface if 0
+				{
+					// restore
+					ctx.restore_texture_stage_state(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
+
+					D3DXMATRIX scale_matrix;
+					D3DXMatrixScaling(&scale_matrix, 1.5f * scale_setting, 1.5f * scale_setting, 1.0f);
+
+					ctx.set_texture_transform(dev, &scale_matrix);
+					ctx.save_tss(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
+					dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+				}
 			}
 
 			// re-draw surface
@@ -3209,6 +3497,60 @@ namespace components
 		}
 	}
 
+	// fastpath rendering tests (cl_modelfastpath/cl_tlucfastpath)
+#if 0
+	void cmeshdx8_renderpass_pass_for_instances_pre_draw(CMeshDX8* mesh, MeshInstanceData_t* info)
+	{
+		if (mesh && info)
+		{
+			cmeshdx8_renderpass_pre_draw(mesh, nullptr, info);
+		}
+	}
+
+	void cmeshdx8_renderpass_pass_for_instances_post_draw([[maybe_unused]] void* device_ptr, D3DPRIMITIVETYPE type, std::int32_t base_vert_index, std::uint32_t min_vert_index, std::uint32_t num_verts, std::uint32_t start_index, std::uint32_t prim_count)
+	{
+		const auto dev = game::get_d3d_device();
+		dev->DrawIndexedPrimitive(type, base_vert_index, min_vert_index, num_verts, start_index, prim_count);
+	}
+
+	//DWORD* instance_info_ptr = nullptr;
+
+	HOOK_RETN_PLACE_DEF(cmeshdx8_renderpass_pass_for_instances_retn_addr);
+	void __declspec(naked) cmeshdx8_renderpass_pass_for_instances_stub()
+	{
+		__asm
+		{
+			//mov		instance_info_ptr, eax;
+			push    eax; // og
+			mov     eax, [edx]; // og
+
+			pushad;
+			push	ebx; // MeshInstanceData_t
+			push	ecx; // CMeshDX8
+			call	cmeshdx8_renderpass_pass_for_instances_pre_draw;
+			add		esp, 8;
+			popad;
+
+
+			// og code
+			call    eax; // mesh->VertexCount
+			mov     ecx, [ebp - 4];
+			mov     edx, [esi + 0x148];
+			push    eax;
+			push    0;
+			push    0;
+			push    ecx;
+			push    edi;
+			//call    edx; // DrawIndexedPrimitive
+			call	cmeshdx8_renderpass_pass_for_instances_post_draw;
+			add		esp, 0x1C;
+			//call	cmeshdx8_renderpass_post_draw; // instead of 'edx' (DrawIndexedPrimitive)
+			//add		esp, 0x1C;
+
+			jmp		cmeshdx8_renderpass_pass_for_instances_retn_addr;
+		}
+	}
+#endif
 
 	// ##########################
 	// ##########################
@@ -3224,6 +3566,24 @@ namespace components
 	{
 		const auto dev = game::get_d3d_device();
 		dev->GetVertexShader(&ff_bmodel::s_shader); 
+
+		if (auto ent = (C_BaseEntity*)baseentity; ent)
+		{
+			const auto& name = std::string_view(ent->m_iName);
+			// emancipation grill on intro4 ---- if (origin->x == 367.500000) // y = 160.000000 z = 64.0000000
+			// render one of the two emancipaction grill surfaces dual sided so that the emissive proxy gets drawn when standing between grid surface 1 and 2
+			if (name == "fizzler_brush" || name.contains("cleanser")) 
+			{
+				//for (auto num = model->___u10.brush.firstmodelsurface; num < model->___u10.brush.firstmodelsurface + 1 /*model->___u10.brush.nummodelsurfaces*/; num++)
+				for (auto num = model->___u10.brush.firstmodelsurface; num < model->___u10.brush.firstmodelsurface + model->___u10.brush.nummodelsurfaces; num++)
+				{
+					const auto surf = &model->___u10.brush.pShared->surfaces2[num]; // num
+					surf->flags |= 0x20; // & check in CBrushBatchRender::BuildTransLists_r
+					surf->flags |= 0x200; // & check in CBrushBatchRender::BuildTransLists_r
+					//0x2000 = nocull -- 0x40 = side check in CBrushBatchRender::BuildTransLists_r
+				}
+			}
+		}
 
 		tbl_hk::bmodel_renderer::table.original<FN>(Index)(ecx, o1, baseentity, model, origin, angles, mode);
 
@@ -3462,6 +3822,237 @@ namespace components
 
 
 	// #
+	// #
+
+	namespace unbake_transform
+	{
+		matrix3x4_t og_pose = {};
+		void R_StudioDrawPoints_hk([[maybe_unused]] studiomeshdata_t* mesh_data, mstudiomodel_t* sub_model)
+		{
+			auto& unbake_transform = model_render::get()->m_unbake_transforms_on_next_static_prop;
+			unbake_transform = false; // always reset
+
+			if (imgui::get()->m_disable_ms_unbake_check) {
+				return;
+			}
+
+			const auto model_str = std::string_view(sub_model->name);
+
+			if (cmd::ms_unbake_info) {
+				cmd::ms_unbake_info_logged_strings.insert(model_str);
+			}
+
+			if (const auto& unbake_model_names = map_settings::get_map_settings().unbake_models;
+				!unbake_model_names.empty())
+			{
+				for (const auto& unbake_mdl_str : unbake_model_names)
+				{
+					if (model_str.contains(unbake_mdl_str))
+					{
+						unbake_transform = true;
+						break;
+					}
+				}
+			}
+		}
+
+		DWORD R_StudioDrawPoints_pSubModel_addr = 0u;
+		HOOK_RETN_PLACE_DEF(R_StudioDrawPoints_retn_addr);
+		void __declspec(naked) R_StudioDrawPoints_stub()
+		{
+			__asm
+			{
+				mov		R_StudioDrawPoints_pSubModel_addr, eax; // save addr
+				mov     eax, [edi + 0xB8]; // og
+
+				pushad;
+				push	R_StudioDrawPoints_pSubModel_addr;
+				push	eax;
+				call	R_StudioDrawPoints_hk;
+				add		esp, 8;
+				popad;
+
+				// og
+				mov     eax, [edi + 0xB8];
+				jmp		R_StudioDrawPoints_retn_addr;
+			}
+		}
+
+		// do not bake position/normals into vertices of "dynamic" static props
+		void R_StudioSoftwareProcessMesh_hk([[maybe_unused]] int num_vertices, matrix3x4_t* pose_to_world, [[maybe_unused]] mstudio_meshvertexdata_t* vert_data)
+		{
+			og_pose = *pose_to_world;
+
+#if 0
+			const auto shaderapi = game::get_shaderapi();
+			BufferedState_t buffer_state {};
+
+			shaderapi->vtbl->GetBufferedState(shaderapi, nullptr, &buffer_state);
+			std::string_view mat_name;
+
+			if (const auto material = shaderapi->vtbl->GetBoundMaterial(shaderapi, nullptr); material) {
+				mat_name = material->vftable->GetName(material);
+			}
+
+			// mesh with multiple parts: debris_metaljunk_01
+			if (mat_name.contains("wall_dest_003")) {
+				int break_me = 1;
+			}
+
+			bool skip = false;
+			if (mat_name.contains("incinerator")) { 
+				skip = false; 
+			}
+
+
+			const mstudiovertex_t* pVertices = (mstudiovertex_t*)vert_data->modelvertexdata->pVertexData;
+			bool skip_model = false; 
+
+			for (int j = 0; j < num_vertices; ++j)
+			{
+				auto vert = &pVertices[j];
+				if (vert->m_BoneWeights.bone[0] || vert->m_BoneWeights.bone[1] || vert->m_BoneWeights.bone[2])
+				{
+					skip_model = true;
+					break;
+				}
+
+				if (vert->m_BoneWeights.numbones > 1)
+				{
+					skip_model = true;
+					break;
+				}
+			}
+
+			if (fix_mesh_transform) {
+				int xx = 1;
+			}
+#endif
+
+			if (imgui::get()->m_disable_ms_unbake_check) {
+				return;
+			}
+
+			auto& unbake_transform = model_render::get()->m_unbake_transforms_on_next_static_prop;
+			if (!unbake_transform)
+			{
+				model_render::get()->m_unbake_transforms_p2w_transform = game::IDENTITY;
+				return;
+			}
+
+			auto& wrld = model_render::get()->m_unbake_transforms_p2w_transform;
+			utils::transpose_matrix3x4_to_d3dxmatrix(*pose_to_world, wrld);
+
+			pose_to_world->m_flMatVal[0][0] = 1.0f;
+			pose_to_world->m_flMatVal[0][1] = 0.0f;
+			pose_to_world->m_flMatVal[0][2] = 0.0f;
+			pose_to_world->m_flMatVal[0][3] = 0.0f; // transform x
+
+			pose_to_world->m_flMatVal[1][0] = 0.0f;
+			pose_to_world->m_flMatVal[1][1] = 1.0f;
+			pose_to_world->m_flMatVal[1][2] = 0.0f;
+			pose_to_world->m_flMatVal[1][3] = 0.0f; // transform y
+
+			pose_to_world->m_flMatVal[2][0] = 0.0f;
+			pose_to_world->m_flMatVal[2][1] = 0.0f;
+			pose_to_world->m_flMatVal[2][2] = 1.0f;
+			pose_to_world->m_flMatVal[2][3] = 0.0f; // transform z
+		}
+
+		HOOK_RETN_PLACE_DEF(R_StudioSoftwareProcessMesh_retn_addr);
+		void __declspec(naked) R_StudioSoftwareProcessMesh_stub()
+		{
+			__asm
+			{
+				pushad;
+
+				push	ecx; // mstudio_meshvertexdata_t*
+				mov     eax, [ebx + 0xC];
+				push    eax;
+				mov		eax, [ebx + 0x18]; // numverts
+				push    eax;
+				call	R_StudioSoftwareProcessMesh_hk;
+				add		esp, 12;
+				popad;
+
+				xorps   xmm1, xmm1; // og
+				push    esi; // og
+				mov     esi, [ecx]; // og
+				jmp		R_StudioSoftwareProcessMesh_retn_addr;
+			}
+		}
+
+
+		void R_StudioSoftwareProcessMesh_Restore_hk(matrix3x4_t* pose_to_world) {
+			*pose_to_world = og_pose; 
+		}
+
+		void __declspec(naked) R_StudioSoftwareProcessMesh_Restore_stub()
+	{
+		__asm
+		{
+			pushad;
+
+			mov     eax, [ebx + 0xC];
+			push    eax;
+			call	R_StudioSoftwareProcessMesh_Restore_hk;
+			add		esp, 4;
+			popad;
+
+			// og
+			mov     esp, ebx; 
+			pop     ebx;
+			retn;
+		}
+	}
+
+
+		void R_StudioRenderFinal_hk() {
+			model_render::get()->m_unbake_transforms_p2w_transform = game::IDENTITY;
+		}
+
+		void __declspec(naked) R_StudioRenderFinal_stub()
+		{
+			__asm
+			{
+				pushad;
+				call	R_StudioRenderFinal_hk;
+				popad;
+
+				// og
+				pop     edi;
+				pop     esi;
+				mov     esp, ebp;
+				pop     ebp;
+				retn    0x28;
+			}
+		}
+	}
+
+	// called from imgui::on_present
+	void model_render::on_present()
+	{
+		if (cmd::ms_unbake_info)
+		{
+			cmd::ms_unbake_info = false;
+
+			std::filesystem::create_directories(game::root_path + COMPMOD_ASSET_DIR "logs\\");
+
+			std::ofstream file;
+			file.open((game::root_path + COMPMOD_ASSET_DIR "logs\\mapsettings_unbake_info.log").c_str());
+
+			file << "MapSettings [UNBAKE] : Logfile containing names of models that were drawn in the capture frame." << "\n\n";
+
+			for (const auto& str : cmd::ms_unbake_info_logged_strings) {
+				file << str << "\n";
+			}
+
+			file.close();
+			cmd::ms_unbake_info_logged_strings.clear();
+		}
+	}
+
+	// #
 	// Commands
 
 	ConCommand xo_debug_toggle_model_info_cmd{};
@@ -3470,11 +4061,22 @@ namespace components
 		cmd::model_info_vis = !cmd::model_info_vis;
 	}
 
+	ConCommand xo_mapsettings_get_unbake_info_cmd{};
+	void model_render::xo_mapsettings_get_unbake_info_fn()
+	{
+		cmd::ms_unbake_info = true;
+	}
+
 	// #
 	// #
 
 	model_render::model_render()
 	{
+		p_this = this;
+
+		// init addon textures
+		init_texture_addons();
+
 		tbl_hk::model_renderer::_interface = utils::module_interface.get<tbl_hk::model_renderer::IVModelRender*>("engine.dll", "VEngineModel016");
 
 		XASSERT(tbl_hk::model_renderer::table.init(tbl_hk::model_renderer::_interface) == false);
@@ -3485,6 +4087,10 @@ namespace components
 
 		utils::hook(RENDERER_BASE + USE_OFFSET(0xB285, 0xADF5), cmeshdx8_renderpass_post_draw_stub, HOOK_JUMP).install()->quick(); // 0125
 		HOOK_RETN_PLACE(cmeshdx8_renderpass_post_draw_retn_addr, RENDERER_BASE + USE_OFFSET(0xB28C, 0xADFC)); // 0125
+
+		// model and tluc fastpath test
+		//utils::hook(RENDERER_BASE + USE_OFFSET(0x0, 0xA56A), cmeshdx8_renderpass_pass_for_instances_stub, HOOK_JUMP).install()->quick();
+		//HOOK_RETN_PLACE(cmeshdx8_renderpass_pass_for_instances_retn_addr, RENDERER_BASE + USE_OFFSET(0x0, 0xA581));
 
 
 		// brushmodels - cubes - etc
@@ -3563,10 +4169,44 @@ namespace components
 		utils::hook(CLIENT_BASE + USE_OFFSET(0x6222D0, 0x619BA0), RenderSpriteCardNew_stub, HOOK_JUMP).install()->quick(); // 0125
 		HOOK_RETN_PLACE(RenderSpriteCardNew_retn_addr, CLIENT_BASE + USE_OFFSET(0x6222D6, 0x619BA6)); // 0125
 
+
+		// Remove world-position baking for vertices of "dynamic" static props and use SetTransform(WORLD) to transform them into the world.
+		// This results in:
+		// - affected mesh instances having the same (remix) hash
+		// - stable hashes for some non-animated props (cube)
+
+		// CStudioRender::R_StudioRenderFinal -> 
+		// CStudioRender::R_StudioDrawPoints -> 
+		// CStudioRender::R_StudioDrawMesh -> 
+		// CStudioRender::R_StudioDrawStaticMesh ->
+		// CStudioRender::R_StudioSoftwareProcessMesh -> 
+		// CProcessMeshWrapper<0,0,0>::R_StudioSoftwareProcessMesh (hooked)
+		// :: transpose pPoseToWorld and use it as world-transform in 'cmeshdx8_renderpass_pre_draw'
+		// :: set pPoseToWorld to identity to remove position/normal baking
+		utils::hook::nop(STUDIORENDER_BASE + USE_OFFSET(0xA6E7, 0xA587), 6);
+		utils::hook(STUDIORENDER_BASE + USE_OFFSET(0xA6E7, 0xA587), unbake_transform::R_StudioSoftwareProcessMesh_stub, HOOK_JUMP).install()->quick();
+		HOOK_RETN_PLACE(unbake_transform::R_StudioSoftwareProcessMesh_retn_addr, STUDIORENDER_BASE + USE_OFFSET(0xA6ED, 0xA58D));
+
+		// restore pPoseToWorld after building the mesh ^
+		utils::hook(STUDIORENDER_BASE + USE_OFFSET(0xA949, 0xA7E9), unbake_transform::R_StudioSoftwareProcessMesh_Restore_stub, HOOK_JUMP).install()->quick();
+
+		// CStudioRender::R_StudioRenderFinal
+		// :: some meshes are made up of multiple submodels or body parts, so 'cmeshdx8_renderpass_pre_draw' gets called multiple times
+		// :: we need to set the modified world-transform back to identity after we are done rendering the mesh to not affect subsequent meshes
+		utils::hook(STUDIORENDER_BASE + USE_OFFSET(0x10DB7, 0x10C57), unbake_transform::R_StudioRenderFinal_stub, HOOK_JUMP).install()->quick();
+
+		// CStudioRender::R_StudioDrawPoints
+		// :: get info about the current mesh and decide if we will be fixing the baked transform or not
+		utils::hook::nop(STUDIORENDER_BASE + USE_OFFSET(0x10C3C, 0x10ADC), 6);
+		utils::hook(STUDIORENDER_BASE + USE_OFFSET(0x10C3C, 0x10ADC), unbake_transform::R_StudioDrawPoints_stub, HOOK_JUMP).install()->quick();
+		HOOK_RETN_PLACE(unbake_transform::R_StudioDrawPoints_retn_addr, STUDIORENDER_BASE + USE_OFFSET(0x10C42, 0x10AE2));
+
+
 		// #
 		// commands
 
 		game::con_add_command(&xo_debug_toggle_model_info_cmd, "xo_debug_toggle_model_info", xo_debug_toggle_model_info_fn, "Toggle model name and radius visualizations");
+		game::con_add_command(&xo_mapsettings_get_unbake_info_cmd, "xo_mapsettings_get_unbake_info", xo_mapsettings_get_unbake_info_fn, "This log names of drawn models in the current frame to a logfile in portal2-rtx/logs/. Useful for MapSettings : [UNBAKE]");
 	}
 }
 

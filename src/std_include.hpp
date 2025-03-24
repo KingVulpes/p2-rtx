@@ -4,6 +4,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 
+#define COMPMOD_ASSET_DIR "portal2-rtx\\"
+
 // enable/disable benchmark logic
 //#define BENCHMARK
 
@@ -31,6 +33,7 @@
 #include <filesystem>
 #include <cassert>
 #include <map>
+#include <set>
 #include <unordered_set>
 #include <fstream>
 #include <iostream>
@@ -54,14 +57,28 @@
 #define XASSERT(x) if (x) MessageBoxA(HWND_DESKTOP, #x, "FATAL ERROR", MB_ICONERROR)
 
 #include "MinHook.h"
-#include "hlsl++.h"
 #include "toml.hpp"
 #include "bridge_remix_api.h"
 
-#include "utils/vector.hpp"
+#pragma warning(push)
+#pragma warning(disable: 6011)
+#pragma warning(disable: 28182)
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "imgui.h"
+#include <backends/imgui_impl_dx9.h>
+#include <backends/imgui_impl_win32.h>
+#include <misc/cpp/imgui_stdlib.h>
+#pragma warning(pop)
+
 #include "game/structs.hpp"
-#include "utils/hooking.hpp"
 #include "utils/utils.hpp"
+#include "utils/vector.hpp"
+
+#include "sdk/engine/c_engine_client.hpp"
+#include "sdk/vgui/surface/c_surface_mgr.hpp"
+#include "sdk/inputsystem/c_input_stackstystem.hpp"
+
+#include "utils/hooking.hpp"
 #include "utils/memory.hpp"
 #include "utils/function.hpp"
 #include "game/functions.hpp"

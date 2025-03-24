@@ -2,6 +2,13 @@
 
 namespace components
 {
+	namespace cmd
+	{
+		extern bool model_info_vis;
+		extern bool ms_unbake_info;
+		extern std::unordered_set<std::string_view> ms_unbake_info_logged_strings;
+	}
+
 	namespace tbl_hk::model_renderer
 	{
 		inline utils::vtable table;
@@ -381,16 +388,21 @@ namespace components
 			bool with_high_gamma = false;
 			bool as_sky = false;
 			bool as_water = false;
+
+			float og_mesh_z_offset = 0.0f;
+
 			bool as_transport_beam = false;
 			bool as_emancipation_grill = false;
 			bool as_portalgun_pickup_beam = false;
 			Vector2D emancipation_offset = {};
 			Vector2D emancipation_scale = { 1.0f, 1.0f };
 			float emancipation_color_scale = 1.0f;
+
 			bool dual_render_with_basetexture2 = false; // render prim a second time with tex2 set as tex1
 			bool dual_render_with_specified_texture = false; // render prim a second time with tex defined in 'dual_render_texture'
 			bool dual_render_with_specified_texture_blend_add = false; // renders second prim using blend mode ADD
 			IDirect3DBaseTexture9* dual_render_texture = nullptr;
+			float dual_render_texture_z_offset = 0.0f;
 
 			void reset()
 			{
@@ -398,6 +410,7 @@ namespace components
 				with_high_gamma = false;
 				as_sky = false;
 				as_water = false;
+				og_mesh_z_offset = 0.0f;
 				as_transport_beam = false;
 				as_emancipation_grill = false;
 				as_portalgun_pickup_beam = false;
@@ -407,6 +420,7 @@ namespace components
 				dual_render_with_basetexture2 = false;
 				dual_render_with_specified_texture = false;
 				dual_render_texture = nullptr;
+				dual_render_texture_z_offset = 0.0f;
 			}
 		};
 
@@ -495,7 +509,13 @@ namespace components
 		model_render();
 		~model_render() = default;
 
+		static inline model_render* p_this = nullptr;
+		static model_render* get() { return p_this; }
+
+		static void draw_nocull_markers();
 		static void init_texture_addons(bool release = false);
+		static void on_present();
+		static void xo_mapsettings_get_unbake_info_fn();
 
 		static inline prim_fvf_context primctx {};
 
@@ -522,6 +542,9 @@ namespace components
 #endif
 
 		static inline float vgui_progress_board_scalar = 1.0f;
+
+		bool m_unbake_transforms_on_next_static_prop = false;
+		D3DXMATRIX m_unbake_transforms_p2w_transform = game::IDENTITY;
 
 		struct game_portal_info_s
 		{

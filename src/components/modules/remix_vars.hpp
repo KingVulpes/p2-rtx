@@ -1,6 +1,6 @@
 #pragma once
 
-namespace components::api
+namespace components
 {
 	class remix_vars : public component
 	{
@@ -11,7 +11,23 @@ namespace components::api
 		static inline remix_vars* p_this = nullptr;
 		static remix_vars* get() { return p_this; }
 
-		enum EASE_TYPE
+		static void xo_vars_parse_options_fn();
+
+		static constexpr const char* EASE_TYPE_STR[] =
+		{
+			"Linear",
+			"SinIn",
+			"SinOut",
+			"SinInOut",
+			"CubicIn",
+			"CubicOut",
+			"CubicInOut",
+			"ExpoIn",
+			"ExpoOut",
+			"ExpoInOut",
+		};
+
+		enum EASE_TYPE : std::uint8_t
 		{
 			EASE_TYPE_LINEAR,
 			EASE_TYPE_SIN_IN,
@@ -78,6 +94,8 @@ namespace components::api
 		static inline std::unordered_map<std::string, option_s> options;
 		static inline std::unordered_map<std::string, option_s> custom_options;
 
+		static std::string		get_config_string_for_option(const std::pair<const std::string, option_s>& o);
+
 		static option_handle	add_custom_option(const std::string& name, const option_s& o);
 		static option_handle	get_custom_option(const char* o);
 		static option_handle	get_custom_option(const std::string& o);
@@ -93,6 +111,7 @@ namespace components::api
 		static void				parse_and_apply_conf_with_lerp(const std::string& conf_name, const std::uint64_t& identifier, const EASE_TYPE ease, float duration, float delay = 0.0f, float delay_transition_back = 0.0f);
 
 		static void				on_map_load();
+		static void				on_sound_start(std::uint32_t hash, const std::string_view& sound_name);
 		static void				on_client_frame();
 
 		struct interpolate_entry_s
