@@ -179,7 +179,11 @@ namespace components
 				ASSIGN(portal_visibility_culling);
 				ASSIGN(check_nodes_for_potential_lights);
 				ASSIGN(spotlight_billboard_spawning);
-				ASSIGN(emancipationgrill_emissive_proxy);
+				ASSIGN(emancipationgrill_emissive_proxy_old);
+				ASSIGN(use_brushfastpath);
+				ASSIGN(use_hardcoded_wheatly_flashlight_bts3);
+				ASSIGN(debug_info_distance);
+				ASSIGN(player_backwards_offset);
 
 			#undef ASSIGN
 			}

@@ -24,6 +24,10 @@ namespace components
 	bool g_player_leaf_update = false;
 	Vector g_player_view_org = {};
 
+	// true if the game is currently rendering our own thirdperson mesh
+	int  g_is_rendering_our_3rd_person_body_mesh = false;
+	int  g_is_rendering_our_3rd_person_weapon_mesh = false;
+
 	// contains overrides for the current area, nullptr if no overrides exist
 	map_settings::area_overrides_s* g_player_current_area_override = nullptr;
 
@@ -466,6 +470,61 @@ namespace components
 	}
 
 
+	// client + 0x8DF20 (int C_BasePlayer::GetLocalPlayer :: cdecl (int))
+
+	// #
+	// #
+
+	HOOK_RETN_PLACE_DEF(draw_our_3rd_person_body_mesh_retn);
+	__declspec(naked) void draw_our_3rd_person_body_mesh_stub()
+	{
+		__asm
+		{
+			mov		g_is_rendering_our_3rd_person_body_mesh, 1; // always our own body mesh if we reach this point
+
+			cmp		g_is_rendering_our_3rd_person_weapon_mesh, 1336;
+			jne		NOT_WEAPON_MESH; // jump to NOT_WEAPON_MESH if the game is NOT rendering the portal gun
+
+			inc		g_is_rendering_our_3rd_person_weapon_mesh;	// rendering PORTAL GUN if this is 1336 (set inside 'C_CombatWeaponClone::DrawModel')
+																// increase by 1 - rendering code will assign playerbody texture category if this is 1337
+																// hack because the mesh draw function we wrap here does not actually draw the weapon
+																// so we can not use the 3rd_person_body_mesh var
+
+		NOT_WEAPON_MESH:
+			jmp		draw_our_3rd_person_body_mesh_retn;
+		}
+	}
+
+	__declspec(naked) void post_draw_our_3rd_person_body_mesh_stub()
+	{
+		__asm
+		{
+			mov		g_is_rendering_our_3rd_person_body_mesh, 0; // always reset after drawing the mesh
+			pop		esi;
+			pop		ebp;
+			retn	8;
+		}
+	}
+
+	// ----
+
+	/*draw_our_3rd_person_weapon_mesh_stub, HOOK_JUMP).install()->quick();
+	HOOK_RETN_PLACE(draw_our_3rd_person_weapon_mesh_og_func, CLIENT_BASE + USE_OFFSET(0x0, 0x58710));
+	HOOK_RETN_PLACE(draw_our_3rd_person_weapon_mesh_retn, CLIENT_BASE + USE_OFFSET(0x0, 0x950B9));*/
+
+	HOOK_RETN_PLACE_DEF(draw_our_3rd_person_weapon_mesh_og_func);
+	HOOK_RETN_PLACE_DEF(draw_our_3rd_person_weapon_mesh_retn);
+	__declspec(naked) void draw_our_3rd_person_weapon_mesh_stub()
+	{
+		__asm
+		{
+			mov		g_is_rendering_our_3rd_person_weapon_mesh, 1336; // 1 will not assign body texture category, 2 will, see stub above
+			call	draw_our_3rd_person_weapon_mesh_og_func;
+			mov		g_is_rendering_our_3rd_person_weapon_mesh, 0; // we are done rendering the portal gun
+			jmp		draw_our_3rd_person_weapon_mesh_retn;
+		}
+	}
+
 	// #
 	// #
 
@@ -902,14 +961,14 @@ namespace components
 					bool can_add_transition = true;
 
 					// do not allow the same transition twice
-					for (const auto& ip : remix_vars::interpolate_stack)
+					/*for (const auto& ip : remix_vars::interpolate_stack)
 					{
 						if (ip.identifier == t->hash)
 						{
 							can_add_transition = false;
 							break;
 						}
-					}
+					}*/
 
 					if (can_add_transition)
 					{
@@ -2020,15 +2079,24 @@ namespace components
 
 		game::cvar_uncheat_and_set_int("r_threaded_particles", 0);
 		game::cvar_uncheat_and_set_int("r_entityclips", 0);
-		game::cvar_uncheat_and_set_int("cl_brushfastpath", 0);
+
+		// This fixes a game breaking bug where a surface on a3_crazy_box is not visible and not gel-able
+		if (map_settings::is_level.sp_a3_crazy_box || game_settings::get()->use_brushfastpath.get_as<bool>()) {
+			game::cvar_uncheat_and_set_int("cl_brushfastpath", 1);
+		}
+		else {
+			game::cvar_uncheat_and_set_int("cl_brushfastpath", 0);
+		}
+
+		//game::cvar_uncheat_and_set_int("cl_brushfastpath", 0);
 		game::cvar_uncheat_and_set_int("cl_tlucfastpath", 0); // 
 		game::cvar_uncheat_and_set_int("cl_modelfastpath", 0); // gain 4-5 fps on some act 4 maps but FF rendering not implemented
 		game::cvar_uncheat_and_set_int("mat_queue_mode", 0); // does improve performance but breaks rendering
 		game::cvar_uncheat_and_set_int("mat_softwarelighting", 0);
-		game::cvar_uncheat_and_set_int("mat_parallaxmap", 0);
+		game::cvar_uncheat_and_set_int("mat_parallaxmap", 0); 
 		game::cvar_uncheat_and_set_int("mat_frame_sync_enable", 0);
 		game::cvar_uncheat_and_set_int("mat_dof_enabled", 0);
-		game::cvar_uncheat_and_set_int("mat_displacementmap", 0);
+		game::cvar_uncheat_and_set_int("mat_displacementmap", 0); 
 		game::cvar_uncheat_and_set_int("mat_drawflat", 0);
 		game::cvar_uncheat_and_set_int("mat_normalmaps", 0);
 		game::cvar_uncheat_and_set_int("r_3dsky", 0);
@@ -2203,11 +2271,21 @@ namespace components
 		utils::hook::set<BYTE>(CLIENT_BASE + USE_OFFSET(0x1EB145, 0x1E5695) + 6, 0x60); // 0125
 
 		// C_Portal_Player::DrawModel :: disable 'C_Portal_Player::ShouldSkipRenderingViewpointPlayerForThisView' check to always render chell
-		utils::hook::nop(CLIENT_BASE + USE_OFFSET(0x27AEBB, 0x274FFB), 2); // 0125
+		//utils::hook::nop(CLIENT_BASE + USE_OFFSET(0x27AEBB, 0x274FFB), 2); // 0125 ----> now done with 'draw_our_own_playerbody_mesh_stub' hook
 
 		utils::hook(CLIENT_BASE + USE_OFFSET(0x28357C, 0x27D4AC), cportalghost_should_draw_stub).install()->quick(); // 0125
 		HOOK_RETN_PLACE(cportalghost_should_draw_retn, CLIENT_BASE + USE_OFFSET(0x283581, 0x27D4B1)); // 0125
 
+
+		// helper var around C_BaseAnimating::DrawModel so we know when we are drawing our player mesh
+		utils::hook(CLIENT_BASE + USE_OFFSET(0x27AEB4, 0x274FF4), draw_our_3rd_person_body_mesh_stub, HOOK_JUMP).install()->quick();
+		HOOK_RETN_PLACE(draw_our_3rd_person_body_mesh_retn, CLIENT_BASE + USE_OFFSET(0x27AEBD, 0x274FFD));
+		utils::hook(CLIENT_BASE + USE_OFFSET(0x27AEE5, 0x275025), post_draw_our_3rd_person_body_mesh_stub, HOOK_JUMP).install()->quick();
+
+		// same ^ for C_CombatWeaponClone::DrawModel (not needed for l4d2)
+		utils::hook(CLIENT_BASE + USE_OFFSET(0x98464, 0x950B4), draw_our_3rd_person_weapon_mesh_stub, HOOK_JUMP).install()->quick(); // E8 ? ? ? ? 5E 5D C2 ? ? ? ? 55 8B EC 56 8B F1 57
+		HOOK_RETN_PLACE(draw_our_3rd_person_weapon_mesh_retn, CLIENT_BASE + USE_OFFSET(0x98469, 0x950B9)); // ^ + offs 4
+		HOOK_RETN_PLACE(draw_our_3rd_person_weapon_mesh_og_func, CLIENT_BASE + USE_OFFSET(0x5B6E0, 0x58710)); // 55 8B EC 83 EC ? 53 57 8B F9 8B 0D ? ? ? ? 89 7D ? FF 15
 
 		// CShaderManager::SetPixelShader :: disable warning print + place stub so we can break and see what type of shader is failing to load
 		utils::hook::nop(RENDERER_BASE + USE_OFFSET(0x2B244, 0x2AAB4), 6); // 0125 // disable 'Trying to set a pixel shader that failed loading' print
@@ -2220,6 +2298,10 @@ namespace components
 		// CBrushBatchRender::DrawOpaqueBrushModel :: ^ same for brushmodels
 		utils::hook::nop(ENGINE_BASE + USE_OFFSET(0x7193A, 0x7153A), 2); // 0125
 		utils::hook::set<BYTE>(ENGINE_BASE + USE_OFFSET(0x71940, 0x71540), 0xEB); // 0125
+
+		// CBrushBatchRender::ComputeLightmapPages :: ^ for fastpath
+		utils::hook::nop(ENGINE_BASE + USE_OFFSET(0x6EC00, 0x6E710), 2); // 0125
+
 
 
 		// Fix map visibility when looking through portals when r_portal_stencil_depth == 0
@@ -2298,6 +2380,9 @@ namespace components
 		utils::hook::set<BYTE>(ENGINE_BASE + USE_OFFSET(0x1F02D0, 0x1ED3F0), 0xEB); // 0125
 		utils::hook::set<BYTE>(ENGINE_BASE + USE_OFFSET(0x1F02FB, 0x1ED41B), 0xEB); // 0125
 		utils::hook::nop(ENGINE_BASE + USE_OFFSET(0x1F035F, 0x1ED47F), 2); // 0125
+
+		// fix invisible brushmodels when using cl_brushfastpath 0 (eg. crazy_box)
+		//utils::hook::nop(CLIENT_BASE + USE_OFFSET(0x1EEF0A, 0x1E944A), 6);
 	}
 
 	main_module::~main_module()

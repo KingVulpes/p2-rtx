@@ -317,13 +317,42 @@ namespace components
 				false
 			};
 
-			variable emancipationgrill_emissive_proxy =
+			variable emancipationgrill_emissive_proxy_old =
 			{
-				"emancipationgrill_emissive_proxy",
+				"emancipationgrill_emissive_proxy_old",
 				"Spawns an additional surface on emancipation grills that can be turned into an invisible, but emissive surface using the toolkit",
-				true
+				false
 			};
-		}; //STATIC_ASSERT_SIZE(var_definitions, 2 * sizeof(variable));
+
+			variable use_brushfastpath =
+			{
+				"use_brushfastpath",
+				("Enabling this sets cl_brushfastpath to true. The game will draw brushmodels in batches which might increase performance but reduce remix-ablitity?\n"
+				"# It is forced on a3 crazy box to fix a game breaking issue with a invisible un-gel-able surface but is not tested elsewhere."),
+				false
+			};
+
+			variable use_hardcoded_wheatly_flashlight_bts3 =
+			{
+				"use_hardcoded_wheatly_flashlight_bts3",
+				"Spawns two hardcoded remixApi lights on wheatly on a2_bts3 when he turns on his flashlight. Deprecated, map_settings system now handles that.",
+				false
+			};
+
+			variable debug_info_distance =
+			{
+				"debug_info_distance",
+				"The distance cutoff (in units) were debug info such as static prop info, unbake info, bone info etc. no longer gets drawn at.",
+				400.0f
+			};
+
+			variable player_backwards_offset =
+			{
+				"player_backwards_offset",
+				"Can be used to offset the shadow casting first person player body backwards. Same logic as found within remix but without the body mesh getting smeary.",
+				18.0f
+			};
+		};
 
 		static inline var_definitions vars = {};
 	};

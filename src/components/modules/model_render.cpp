@@ -372,9 +372,15 @@ namespace components
 		dev->GetTexture(0, &og_tex);
 		dev->SetTexture(0, tex_addons::white);
 
-		DWORD og_rs;
+		DWORD og_rs, og_blend;
 		dev->GetRenderState((D3DRENDERSTATETYPE)150, &og_rs);
+		dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &og_blend);
 
+		D3DXMATRIX og_tex_transform = {};
+		dev->GetTransform(D3DTS_TEXTURE0, &og_tex_transform);
+
+		dev->SetTransform(D3DTS_TEXTURE0, &game::IDENTITY);
+		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, false);
 		dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
 		//D3DXMATRIX mtx = game::IDENTITY;
 
@@ -421,6 +427,7 @@ namespace components
 		dev->SetVertexShader(og_vs);
 		dev->SetTexture(0, og_tex);
 		dev->SetRenderState((D3DRENDERSTATETYPE)150, og_rs);
+		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, og_blend);
 		dev->SetFVF(NULL);
 		dev->SetTransform(D3DTS_WORLD, &game::IDENTITY);
 	}
@@ -508,7 +515,8 @@ namespace components
 
 			if (cmd::model_info_vis)
 			{
-				if (g_player_view_org.DistToSqr(pInfo.origin) < 1000.0f * 1000.0f)
+				const auto cutoff_dist = game_settings::get()->debug_info_distance.get_as<float>();
+				if (g_player_view_org.DistToSqr(pInfo.origin) < cutoff_dist * cutoff_dist)
 				{
 					game::debug_add_text_overlay(&pInfo.origin.x, pInfo.pModel->szPathName, 0);
 					game::debug_add_text_overlay(&pInfo.origin.x, utils::va("Radius: %.7f", pInfo.pModel->radius), 1);
@@ -520,7 +528,8 @@ namespace components
 		{
 			if (cmd::model_info_vis)
 			{
-				if (game::get_current_view_origin()->DistToSqr(pInfo.origin) < 1000.0f * 1000.0f)
+				const auto cutoff_dist = game_settings::get()->debug_info_distance.get_as<float>();
+				if (game::get_current_view_origin()->DistToSqr(pInfo.origin) < cutoff_dist * cutoff_dist)
 				{
 					game::debug_add_text_overlay(&pInfo.origin.x, "#IGNORED#", 0, 1.0f, 0.6f, 0.6f, 0.6f);
 					game::debug_add_text_overlay(&pInfo.origin.x, pInfo.pModel->szPathName, 1, 1.0f, 0.6f, 0.6f, 0.6f);
@@ -593,7 +602,7 @@ namespace components
 
 	// Helper function to draw portal gel's
 	// > will directly edit the vertex buffer when brushmodels are rendered
-	void render_painted_surface(prim_fvf_context& ctx, CPrimList* primlist)
+	void render_painted_surface(prim_fvf_context& ctx, std::uint32_t num_indices, std::uint32_t first_index_offset)
 	{
 		/*	// vs
 			float3 vPos : POSITION;
@@ -634,6 +643,7 @@ namespace components
 			// > Brushmodels are rendered in batches -> waaaay less locks
 			// - Brushmodels are considered static if mat_forcedynamic or mat_drawflat is not 1 (vb is NOT recreated every frame)
 			if (is_rendering_bmodel_paint)
+			//if (primlist)
 			{
 				IDirect3DIndexBuffer9* ib = nullptr;
 				if (SUCCEEDED(dev->GetIndices(&ib)))
@@ -642,10 +652,10 @@ namespace components
 					if (SUCCEEDED(ib->Lock(0, 0, &ib_data, D3DLOCK_READONLY)))
 					{
 						// add relevant indices without duplicates
-						std::unordered_set<std::uint16_t> indices; indices.reserve(primlist->m_NumIndices);
-						for (auto i = 0u; i < (std::uint32_t)primlist->m_NumIndices; i++)
+						std::unordered_set<std::uint16_t> indices; indices.reserve(num_indices);
+						for (auto i = 0u; i < (std::uint32_t)num_indices; i++)
 						{
-							indices.insert(static_cast<std::uint16_t*>(ib_data)[primlist->m_FirstIndex + i]);
+							indices.insert(static_cast<std::uint16_t*>(ib_data)[first_index_offset + i]);
 						}
 
 						ib->Unlock();
@@ -706,9 +716,11 @@ namespace components
 			dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX7);
 
 			// assign paint map texture to texture slot 0
-			if (ctx.info.buffer_state.m_BoundTexture[9])
+			//if (ctx.info.buffer_state.m_BoundTexture[9])
+			const auto im = imgui::get();
+			if (ctx.info.buffer_state.m_BoundTexture[im->m_debug_paint_sampler_index])
 			{
-				if (const auto  paint_map = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[9]);
+				if (const auto  paint_map = shaderapi->vtbl->GetD3DTexture(shaderapi, nullptr, ctx.info.buffer_state.m_BoundTexture[im->m_debug_paint_sampler_index]);
 					paint_map)
 				{
 					ctx.save_texture(dev, 0);
@@ -974,6 +986,114 @@ namespace components
 		}
 	}
 #endif
+
+	void RopeManager_DrawRenderCache_mid_hk(CMeshBuilder* builder)
+	{
+		const auto dev = game::get_d3d_device();
+
+		auto CatmullRomSpline = [](const Vector4D& a, const Vector4D& b, const Vector4D& c, const Vector4D& d, const float t)
+			{
+				return b + 0.5f * t * (c - a + t * (2.0f * a - 5.0f * b + 4.0f * c - d + t * (-a + 3.0f * b - 3.0f * c + d)));
+			};
+
+		auto DCatmullRomSpline3 = [](const Vector& a, const Vector& b, const Vector& c, const Vector& d, const float t)
+			{
+				return 0.5f * (c - a + t * (2.0f * a - 5 * b + 4 * c - d + t * (3.0f * b - a - 3.0f * c + d))
+					+ t * (2.0f * a - 5.0f * b + 4 * c - d + 2.0f * (t * (3 * b - a - 3.0f * c + d))));
+			};
+
+		Vector eyePos;
+		{
+			float v[4] = {}; dev->GetVertexShaderConstantF(2, v, 1);
+			eyePos = Vector(v[0], v[1], v[2]);
+		}
+
+		for (auto v = 0; v < builder->m_VertexBuilder.m_nVertexCount; v++)
+		{
+			const auto v_pos_in_src_buffer = v * builder->m_VertexBuilder.m_VertexSize_Position;
+
+			const auto src_vParms = reinterpret_cast<Vector*>(((DWORD)builder->m_VertexBuilder.m_pCurrPosition + v_pos_in_src_buffer));
+			const auto dest_pos = reinterpret_cast<Vector*>(src_vParms);
+
+			const auto src_vTint = reinterpret_cast<D3DCOLOR*>(((DWORD)builder->m_VertexBuilder.m_pCurrColor + v_pos_in_src_buffer));
+
+			const auto src_vSplinePt0 = reinterpret_cast<Vector4D*>(((DWORD)builder->m_VertexBuilder.m_pCurrTexCoord[0] + v_pos_in_src_buffer));
+			const auto dest_tc = reinterpret_cast<Vector2D*>(src_vSplinePt0);
+
+			const auto src_vSplinePt1 = reinterpret_cast<Vector4D*>(((DWORD)builder->m_VertexBuilder.m_pCurrTexCoord[1] + v_pos_in_src_buffer));
+			const auto src_vSplinePt2 = reinterpret_cast<Vector4D*>(((DWORD)builder->m_VertexBuilder.m_pCurrTexCoord[2] + v_pos_in_src_buffer));
+			const auto src_vSplinePt3 = reinterpret_cast<Vector4D*>(((DWORD)builder->m_VertexBuilder.m_pCurrTexCoord[3] + v_pos_in_src_buffer));
+
+			// save vParms (because we will be overriding them when writing pos)
+			const float parmsX = src_vParms->x;
+			const float parmsY = src_vParms->y;
+			const float parmsZ = src_vParms->z;
+
+			const auto P0 = *src_vSplinePt0;
+			const auto P1 = *src_vSplinePt1;
+			const auto P2 = *src_vSplinePt2;
+			const auto P3 = *src_vSplinePt3;
+
+			auto posrad = CatmullRomSpline(P0, P1, P2, P3, parmsX);
+
+			Vector v2p = { 0.0f, 0.0f, 1.0f };
+			v2p.x = posrad.x - eyePos.x;	// screen aligned
+			v2p.y = posrad.y - eyePos.y;
+			v2p.z = posrad.z - eyePos.z;
+
+			Vector tangent = DCatmullRomSpline3(P0, P1, P2, P3, parmsX);
+
+			//float3 ofs = normalize(cross(v2p, normalize(tangent)));
+			tangent.NormalizeChecked();
+			Vector ofs = v2p.Cross(tangent); // maybe switch these - no difference
+			ofs.NormalizeChecked();
+
+			//posrad.xyz += ofs * (posrad.w * (v.vParms.z - .5));
+			const auto add = ofs.Scale(posrad.w * (parmsZ - 0.5f));
+			posrad.x += add.x;
+			posrad.y += add.y;
+			posrad.z += add.z;
+
+			// pos
+			dest_pos->x = posrad.x;
+			dest_pos->y = posrad.y;
+			dest_pos->z = posrad.z;
+
+			// o.texCoord.xy = float2( 1.0f - v.vParms.z, v.vParms.y );
+			dest_tc->x = 1.0f - parmsZ;
+			dest_tc->y = parmsY;
+
+			// unpack color
+			Vector4D color;
+			color.x = static_cast<float>((*src_vTint >> 16) & 0xFF) / 255.0f * 1.0f;
+			color.y = static_cast<float>((*src_vTint >> 8) & 0xFF) / 255.0f * 1.0f;
+			color.z = static_cast<float>((*src_vTint >> 0) & 0xFF) / 255.0f * 1.0f;
+			color.w = static_cast<float>((*src_vTint >> 24) & 0xFF) / 255.0f * 0.1f; // ! 0.1
+
+			// write color
+			*src_vTint = D3DCOLOR_COLORVALUE(color.x, color.y, color.z, color.w);
+		}
+	}
+
+	HOOK_RETN_PLACE_DEF(RopeManager_DrawRenderCache_retn_addr);
+	void __declspec(naked) RopeManager_DrawRenderCache_stub()
+	{
+		__asm
+		{
+			pushad;
+			lea     eax, [ebp - 0x2F4];
+			push	eax; // builder
+			call	RopeManager_DrawRenderCache_mid_hk;
+			add		esp, 4;
+			popad;
+
+			// og
+			mov     eax, [ebp - 0x200];
+			jmp		RopeManager_DrawRenderCache_retn_addr;
+		}
+	}
+
+
 
 
 	/**
@@ -1516,12 +1636,22 @@ namespace components
 		if (ff_bmodel::s_shader && mesh->m_VertexFormat == 0x2480033)
 		{
 			//ctx.modifiers.do_not_render = true;
-			dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+			//dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+
 			dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX7);
 			dev->SetVertexShader(nullptr);
 
-			if (is_rendering_bmodel_paint) {
-				render_painted_surface(ctx, primlist);
+			if (info && info->m_pPoseToWorld)
+			{
+				utils::transpose_matrix3x4_to_d3dxmatrix(*info->m_pPoseToWorld, ctx.info.buffer_state.m_Transform[0]);
+				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
+
+				if (is_rendering_bmodel_paint) {
+					render_painted_surface(ctx, info->m_nIndexCount, info->m_nIndexOffset);
+				}
+			}
+			else if (is_rendering_bmodel_paint) {
+				render_painted_surface(ctx, primlist->m_NumIndices, primlist->m_FirstIndex);
 			}
 		}
 
@@ -1530,8 +1660,9 @@ namespace components
 		{
 			//ctx.modifiers.do_not_render = true;
 
+			const auto is_viewmodel = ctx.info.buffer_state.m_Transform[2].m[3][2] == -1.00003529f;
 			// viewmodel
-			if (ctx.info.buffer_state.m_Transform[2].m[3][2] == -1.00003529f)
+			if (is_viewmodel)
 			{
 				ctx.save_view_transform(dev);
 				ctx.save_projection_transform(dev);
@@ -1576,6 +1707,41 @@ namespace components
 				}
 			}
 
+			bool using_custom_transform = false;
+
+			if (!is_viewmodel && 
+				(g_is_rendering_our_3rd_person_body_mesh || g_is_rendering_our_3rd_person_weapon_mesh == 1337))
+			{
+				// backwards offset similar to whats found in remix but without the body mesh getting smeary
+				const auto backward_offset = game_settings::get()->player_backwards_offset.get_as<float>();
+				if (!utils::float_equal(backward_offset, 0.0f))
+				{
+					const Vector forward = *game::get_current_view_forward();
+					Vector backward_offset_vector = forward;
+					backward_offset_vector.z = 0.0f;
+
+					backward_offset_vector.Normalize();
+					backward_offset_vector *= -backward_offset;
+
+					const D3DXMATRIX backward_offset_matrix
+					{
+						1.f, 0.f, 0.f, 0.f,
+						0.f, 1.f, 0.f, 0.f,
+						0.f, 0.f, 1.f, 0.f,
+						backward_offset_vector.x, backward_offset_vector.y, backward_offset_vector.z, 1.f
+					};
+
+					D3DXMATRIX final_world_matrix; 
+					D3DXMatrixMultiply(&final_world_matrix, &backward_offset_matrix, &ctx.info.buffer_state.m_Transform[0]);
+
+					dev->SetTransform(D3DTS_WORLD, &final_world_matrix);
+					using_custom_transform = true;
+				}
+
+				set_remix_texture_categories(dev, ctx, REMIXAPI_INSTANCE_CATEGORY_BIT_THIRD_PERSON_PLAYER_BODY | REMIXAPI_INSTANCE_CATEGORY_BIT_THIRD_PERSON_PLAYER_MODEL);
+			}
+
+
 #if 0		// models that can cause problems with vertex transform unbaking (debug)
 			if (ctx.info.material_name.contains("incinerator_door")) {
 				int break_me = 1; 
@@ -1593,7 +1759,10 @@ namespace components
 
 			// holds identity or transposed poseToMesh on unbaked meshes (MapSettings [UNBAKE]) - see R_StudioSoftwareProcessMesh_hk
 			auto wrld = &model_render::get()->m_unbake_transforms_p2w_transform;
-			dev->SetTransform(D3DTS_WORLD, wrld);
+
+			if (!using_custom_transform) {
+				dev->SetTransform(D3DTS_WORLD, wrld);
+			}
 			//dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
 
 			dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX6); 
@@ -1667,13 +1836,13 @@ namespace components
 						dev->SetTexture(0, basemap2);
 					}
 
-					// create a scaling matrix
-					D3DXMATRIX scaleMatrix;
-					D3DXMatrixScaling(&scaleMatrix, 1.0f, 29.0f, 1.0f);
+					//// create a scaling matrix
+					//D3DXMATRIX scaleMatrix;
+					//D3DXMatrixScaling(&scaleMatrix, 1.0f, 29.0f, 1.0f);
 
-					ctx.set_texture_transform(dev, &scaleMatrix);
-					ctx.save_tss(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
-					dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+					//ctx.set_texture_transform(dev, &scaleMatrix);
+					//ctx.save_tss(dev, D3DTSS_TEXTURETRANSFORMFLAGS);
+					//dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
 				}
 			}
 
@@ -1723,7 +1892,7 @@ namespace components
 				// -> so we need to edit the vertex buffer for each and every surface
 				// mat_fullbright 1 does not draw paint
 				if (is_rendering_paint) {
-					render_painted_surface(ctx, primlist);
+					render_painted_surface(ctx, primlist->m_NumIndices, primlist->m_FirstIndex);
 				}
 			} 
 
@@ -2705,12 +2874,18 @@ namespace components
 				dev->SetTransform(D3DTS_WORLD, &ctx.info.buffer_state.m_Transform[0]);
 			}
 
-			// hanging cables - requires vertex shader - verts not modified on the cpu
+			// SplineRope
+			// > cable/cable
+			// hanging cables - verts modified in RopeManager_DrawRenderCache_mid_hk
 			else if (mesh->m_VertexFormat == 0x24900005)
 			{
-				//ctx.modifiers.do_not_render = true; // they can freak out sometimes so just ignore them for now
+				//ctx.modifiers.do_not_render = true;
 				ctx.save_texture(dev, 0);
 				dev->SetTexture(0, tex_addons::black_shader);
+
+				ctx.save_vs(dev);
+				dev->SetVertexShader(nullptr);
+				dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
 			}
 
 			// SpriteCard shader
@@ -3376,7 +3551,7 @@ namespace components
 			dev->DrawIndexedPrimitive(type, base_vert_index, min_vert_index, num_verts, start_index, prim_count);
 
 			// third time as emissive proxy
-			if (game_settings::get()->emancipationgrill_emissive_proxy.get_as<bool>())
+			if (game_settings::get()->emancipationgrill_emissive_proxy_old.get_as<bool>())
 			{
 				ctx.restore_texture_transform(dev);
 				ctx.restore_texture(dev, 0);
@@ -3498,7 +3673,7 @@ namespace components
 	}
 
 	// fastpath rendering tests (cl_modelfastpath/cl_tlucfastpath)
-#if 0
+#if 1
 	void cmeshdx8_renderpass_pass_for_instances_pre_draw(CMeshDX8* mesh, MeshInstanceData_t* info)
 	{
 		if (mesh && info)
@@ -3586,6 +3761,23 @@ namespace components
 		}
 
 		tbl_hk::bmodel_renderer::table.original<FN>(Index)(ecx, o1, baseentity, model, origin, angles, mode);
+
+		dev->SetTransform(D3DTS_WORLD, &game::IDENTITY);
+		dev->SetFVF(NULL);
+
+		if (ff_bmodel::s_shader)
+		{
+			dev->SetVertexShader(ff_bmodel::s_shader);
+			ff_bmodel::s_shader = nullptr;
+		}
+	}
+
+	void __fastcall tbl_hk::bmodel_renderer::DrawBrushModelArray::Detour(void* ecx, void* o1, void* matrendercontext, int count, const BrushArrayInstanceData_t* instance_data, int model_type_flags)
+	{
+		const auto dev = game::get_d3d_device();
+		dev->GetVertexShader(&ff_bmodel::s_shader);
+
+		tbl_hk::bmodel_renderer::table.original<FN>(Index)(ecx, o1, matrendercontext, count, instance_data, model_type_flags);
 
 		dev->SetTransform(D3DTS_WORLD, &game::IDENTITY);
 		dev->SetFVF(NULL);
@@ -3819,6 +4011,23 @@ namespace components
 			jmp		draw_painted_bmodel_surfaces_retn_addr;
 		}
 	}
+
+	HOOK_RETN_PLACE_DEF(draw_painted_bmodel_array_surfaces_retn_addr);
+	void __declspec(naked) draw_painted_bmodel_array_surfaces_stub()
+	{
+		__asm
+		{
+			mov		is_rendering_bmodel_paint, 1;
+
+			// og
+			mov		[ebp - 0x40], esi;
+			call    eax; // DrawInstances
+
+			mov		is_rendering_bmodel_paint, 0;
+			jmp		draw_painted_bmodel_array_surfaces_retn_addr;
+		}
+	}
+			// draw_painted_bmodel_array_surfaces_stub
 
 
 	// #
@@ -4089,14 +4298,15 @@ namespace components
 		HOOK_RETN_PLACE(cmeshdx8_renderpass_post_draw_retn_addr, RENDERER_BASE + USE_OFFSET(0xB28C, 0xADFC)); // 0125
 
 		// model and tluc fastpath test
-		//utils::hook(RENDERER_BASE + USE_OFFSET(0x0, 0xA56A), cmeshdx8_renderpass_pass_for_instances_stub, HOOK_JUMP).install()->quick();
-		//HOOK_RETN_PLACE(cmeshdx8_renderpass_pass_for_instances_retn_addr, RENDERER_BASE + USE_OFFSET(0x0, 0xA581));
+		utils::hook(RENDERER_BASE + USE_OFFSET(0xA9FA, 0xA56A), cmeshdx8_renderpass_pass_for_instances_stub, HOOK_JUMP).install()->quick();
+		HOOK_RETN_PLACE(cmeshdx8_renderpass_pass_for_instances_retn_addr, RENDERER_BASE + USE_OFFSET(0xAA11, 0xA581));
 
 
 		// brushmodels - cubes - etc
 		tbl_hk::bmodel_renderer::_interface = utils::module_interface.get<tbl_hk::bmodel_renderer::IVRenderView*>("engine.dll", "VEngineRenderView013");
 		XASSERT(tbl_hk::bmodel_renderer::table.init(tbl_hk::bmodel_renderer::_interface) == false);
 		XASSERT(tbl_hk::bmodel_renderer::table.hook(&tbl_hk::bmodel_renderer::DrawBrushModelEx::Detour, tbl_hk::bmodel_renderer::DrawBrushModelEx::Index) == false);
+		XASSERT(tbl_hk::bmodel_renderer::table.hook(&tbl_hk::bmodel_renderer::DrawBrushModelArray::Detour, tbl_hk::bmodel_renderer::DrawBrushModelArray::Index) == false);
 
 		// enable mat_wireframe on portals
 		//utils::hook::nop(CLIENT_BASE + 0x2BD41C, 6);
@@ -4138,6 +4348,9 @@ namespace components
 		utils::hook(ENGINE_BASE + USE_OFFSET(0x7271C, 0x7231C), draw_painted_bmodel_surfaces_stub, HOOK_JUMP).install()->quick(); // 0125
 		HOOK_RETN_PLACE(draw_painted_bmodel_surfaces_retn_addr, ENGINE_BASE + USE_OFFSET(0x72721, 0x72321)); // 0125
 
+		utils::hook(ENGINE_BASE + USE_OFFSET(0x6FC2B, 0x6F73B), draw_painted_bmodel_array_surfaces_stub, HOOK_JUMP).install()->quick(); // 0125
+		HOOK_RETN_PLACE(draw_painted_bmodel_array_surfaces_retn_addr, ENGINE_BASE + USE_OFFSET(0x6FC30, 0x6F740)); // 0125
+
 		// ----
 
 		// modify trail vertices upon creation, right before the mesh gets unlocked
@@ -4163,6 +4376,12 @@ namespace components
 		utils::hook(CLIENT_BASE + USE_OFFSET(0x62281E, 0x61A0EE), RenderSpritesTrail_Render_stub, HOOK_JUMP).install()->quick(); // 0125
 		HOOK_RETN_PLACE(RenderSpritesTrail_Render_retn_addr, CLIENT_BASE + USE_OFFSET(0x622824, 0x61A0F4)); // 0125
 #endif
+
+		// Fix actual ropes
+		utils::hook::nop(CLIENT_BASE + USE_OFFSET(0xBD043, 0xB9613), 6);
+		utils::hook(CLIENT_BASE + USE_OFFSET(0xBD043, 0xB9613), RopeManager_DrawRenderCache_stub, HOOK_JUMP).install()->quick();
+		HOOK_RETN_PLACE(RopeManager_DrawRenderCache_retn_addr, CLIENT_BASE + USE_OFFSET(0xBD049, 0xB9619));
+
 
 		// C_OP_RenderSprites::Render :: fix SpriteCard UV's
 		utils::hook::nop(CLIENT_BASE + USE_OFFSET(0x6222D0, 0x619BA0), 6); // 0125
